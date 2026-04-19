@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+
+# 本地数据与运行生成（勿提交）
+wellsite.db
+wellsite.db-journal
+wellsite.bak_*.db
+*.db.bak_*
+backup_ui_settings.json
+warehouse_layout.json
+
+# 用户上传的调度附图（体积大、隐私）
+Picture record/
+
+# IDE / 系统
+.idea/
+.vscode/
+.cursor/
+*.log
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,7 @@
+PySide6
+pandas
+openpyxl
+pillow
+
+# 打包 Windows exe: .venv\Scripts\pip install pyinstaller 后运行 build_exe.bat
+# 重新生成程序图标: .venv\Scripts\python scripts\generate_app_icon.py
