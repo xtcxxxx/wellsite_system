@@ -29,6 +29,20 @@ class MaterialManager:
         rows = self.db.fetchall("SELECT id, name FROM categories ORDER BY name")
         return [dict(row) for row in rows]
 
+    def delete_category(self, category_id: int) -> bool:
+        """
+        删除类别：将该类别下的物料改为未分类（category_id 置空），再删除类别行。
+        """
+        row = self.db.fetchone("SELECT id, name FROM categories WHERE id = ?", (category_id,))
+        if not row:
+            raise ValueError("类别不存在或已被删除")
+        self.db.execute(
+            "UPDATE materials SET category_id = NULL WHERE category_id = ?",
+            (category_id,),
+        )
+        self.db.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+        return True
+
     def find_model_id(self, material_id: int, model_text: str) -> Optional[int]:
         text = (model_text or "").strip()
         if not text:

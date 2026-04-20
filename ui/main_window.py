@@ -264,7 +264,7 @@ def _format_dispatch_materials_qty_display(text: str) -> str:
 
 
 class FlowEdge(QGraphicsLineItem):
-    def __init__(self, source: WarehouseNode, target: WarehouseNode):
+    def __init__(self, source: "WarehouseNode", target: "WarehouseNode"):
         super().__init__()
         self.source = source
         self.target = target
@@ -955,16 +955,26 @@ class MainWindow(QMainWindow):
         box = QGroupBox("物料管理")
         v = QVBoxLayout(box)
 
-        # ---------- 新增类别 ----------
-        h_cat = QHBoxLayout()
+        # ---------- 新增类别（在「删除类别」正上方）----------
+        h_cat_add = QHBoxLayout()
         self.category_input = QLineEdit()
         self.category_input.setPlaceholderText("请输入新类别名称")
         btn_add_category = QPushButton("➕ 新增类别")
         btn_add_category.clicked.connect(self.add_category)
+        h_cat_add.addWidget(self.category_input, 1)
+        h_cat_add.addWidget(btn_add_category)
+        v.addLayout(h_cat_add)
 
-        h_cat.addWidget(self.category_input)
-        h_cat.addWidget(btn_add_category)
-        v.addLayout(h_cat)
+        # ---------- 删除类别 ----------
+        h_cat_del = QHBoxLayout()
+        self.category_delete_combo = QComboBox()
+        self.category_delete_combo.setMinimumWidth(160)
+        btn_delete_category = QPushButton("🗑 删除类别")
+        btn_delete_category.setStyleSheet("background: #f56c6c;")
+        btn_delete_category.clicked.connect(self.delete_selected_category)
+        h_cat_del.addWidget(self.category_delete_combo, 1)
+        h_cat_del.addWidget(btn_delete_category)
+        v.addLayout(h_cat_del)
 
         # ---------- 新增物料 ----------
         h_material = QHBoxLayout()
@@ -1064,11 +1074,38 @@ class MainWindow(QMainWindow):
         except Exception as e:
            QMessageBox.critical(self, "失败", str(e))
 
+    def delete_selected_category(self):
+        cid = self.category_delete_combo.currentData()
+        if cid is None:
+            QMessageBox.warning(self, "提示", "暂无类别可删除，请先在下拉框中选择要删除的类别")
+            return
+        name = self.category_delete_combo.currentText()
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定删除类别「{name}」吗？\n\n"
+            "该类别下的物料将变为「未分类」，物料本身不会被删除。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self.material_mgr.delete_category(int(cid))
+            self.refresh_material_list()
+            QMessageBox.information(self, "成功", f"类别「{name}」已删除")
+        except ValueError as e:
+            QMessageBox.warning(self, "无法删除", str(e))
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", str(e))
+
     def refresh_material_category_combo(self):
         self.material_category_combo.clear()
+        self.category_delete_combo.clear()
         categories = self.material_mgr.list_categories()
         for c in categories:
             self.material_category_combo.addItem(c["name"], c["id"])
+            self.category_delete_combo.addItem(c["name"], c["id"])
 
     def create_dispatch_page(self):
         """调度管理页面 - 支持创建调度记录 + 拓扑图"""
