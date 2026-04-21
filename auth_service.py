@@ -41,12 +41,12 @@ class AuthManager:
         self.ensure_default_users()
 
     def ensure_default_users(self) -> None:
-        """无用户时创建演示账号：admin / admin123，普通用户 wgd123 / 112233。"""
+        """无用户时创建演示账号：admin / 132123，普通用户 wgd123 / 112233。"""
         n = self.db.fetch_scalar("SELECT COUNT(*) FROM users")
         if not n or int(n) == 0:
             self.db.execute(
                 "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                ("admin", hash_password("admin123"), "admin"),
+                ("admin", hash_password("132123"), "admin"),
             )
             self.db.execute(
                 "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
@@ -62,6 +62,16 @@ class AuthManager:
             self.db.execute(
                 "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
                 ("wgd123", hash_password("112233"), "user"),
+            )
+        # 仍使用旧默认密码 admin123 的管理员 → 新默认 132123（自定义密码不受影响）
+        admin_row = self.db.fetchone(
+            "SELECT id, password_hash FROM users WHERE LOWER(username) = LOWER(?)",
+            ("admin",),
+        )
+        if admin_row and verify_password("admin123", admin_row["password_hash"] or ""):
+            self.db.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (hash_password("132123"), int(admin_row["id"])),
             )
 
     def authenticate(self, username: str, password: str) -> Optional[Dict[str, Any]]:

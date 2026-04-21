@@ -1184,6 +1184,8 @@ class MainWindow(QMainWindow):
         btn_delete = QPushButton("🗑 删除选中仓库")
         btn_delete.clicked.connect(self.delete_selected_warehouse)
         btn_delete.setStyleSheet("background: #f56c6c;")
+        if not self._is_admin:
+            btn_delete.hide()
 
         v.addLayout(h_layout)
         v.addWidget(self.warehouse_list)
@@ -1191,6 +1193,12 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(box)
         return widget
+
+    def _ensure_admin(self) -> bool:
+        if self._is_admin:
+            return True
+        QMessageBox.warning(self, "无权限", "仅管理员可进行此操作。")
+        return False
 
     def create_material_page(self):
         widget = QWidget()
@@ -1209,8 +1217,10 @@ class MainWindow(QMainWindow):
         h_cat_add.addWidget(btn_add_category)
         v.addLayout(h_cat_add)
 
-        # ---------- 删除类别 ----------
-        h_cat_del = QHBoxLayout()
+        # ---------- 删除类别（仅管理员可见）----------
+        cat_del_wrap = QWidget()
+        h_cat_del = QHBoxLayout(cat_del_wrap)
+        h_cat_del.setContentsMargins(0, 0, 0, 0)
         self.category_delete_combo = QComboBox()
         self.category_delete_combo.setMinimumWidth(160)
         btn_delete_category = QPushButton("🗑 删除类别")
@@ -1218,7 +1228,9 @@ class MainWindow(QMainWindow):
         btn_delete_category.clicked.connect(self.delete_selected_category)
         h_cat_del.addWidget(self.category_delete_combo, 1)
         h_cat_del.addWidget(btn_delete_category)
-        v.addLayout(h_cat_del)
+        v.addWidget(cat_del_wrap)
+        if not self._is_admin:
+            cat_del_wrap.hide()
 
         # ---------- 新增物料 ----------
         h_material = QHBoxLayout()
@@ -1248,13 +1260,18 @@ class MainWindow(QMainWindow):
         # ---------- 物料列表 ----------
         self.material_list = QListWidget()
         v.addWidget(self.material_list)
-        self.material_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.material_list.customContextMenuRequested.connect(self.show_context_menu)
+        if self._is_admin:
+            self.material_list.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.material_list.customContextMenuRequested.connect(self.show_context_menu)
+        else:
+            self.material_list.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
         layout.addWidget(box)
         return widget
     
     def show_context_menu(self, pos):
+        if not self._ensure_admin():
+            return
         item = self.material_list.itemAt(pos)
         if item:
             menu = QMenu()
@@ -1319,6 +1336,8 @@ class MainWindow(QMainWindow):
            QMessageBox.critical(self, "失败", str(e))
 
     def delete_selected_category(self):
+        if not self._ensure_admin():
+            return
         cid = self.category_delete_combo.currentData()
         if cid is None:
             QMessageBox.warning(self, "提示", "暂无类别可删除，请先在下拉框中选择要删除的类别")
@@ -1546,6 +1565,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "添加失败", str(e))
 
     def delete_selected_warehouse(self):
+        if not self._ensure_admin():
+            return
         current_item = self.warehouse_list.currentItem()
         if not current_item:
             QMessageBox.warning(self, "提示", "请先选择要删除的仓库！")
