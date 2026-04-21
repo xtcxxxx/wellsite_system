@@ -538,6 +538,29 @@ class DispatchManager:
         except Exception as e:
             raise RuntimeError(f"导出 Excel 失败: {e}") from e
 
+    def list_dispatches_for_warehouse(self, warehouse_id: int) -> List[Dict]:
+        """与某仓库相关的调度记录（作为调入或调出方），按时间倒序。"""
+        rows = self.db.fetchall(
+            """
+            SELECT
+                dr.id,
+                dr.timestamp,
+                dr.executor,
+                dr.remarks,
+                dr.from_warehouse_id,
+                dr.to_warehouse_id,
+                fw.name AS from_name,
+                tw.name AS to_name
+            FROM dispatch_records dr
+            JOIN warehouses fw ON dr.from_warehouse_id = fw.id
+            JOIN warehouses tw ON dr.to_warehouse_id = tw.id
+            WHERE dr.from_warehouse_id = ? OR dr.to_warehouse_id = ?
+            ORDER BY dr.timestamp DESC
+            """,
+            (warehouse_id, warehouse_id),
+        )
+        return [dict(row) for row in rows]
+
     def get_warehouse_flow(self, warehouse_id: int) -> Dict[str, List[Dict]]:
         """获取指定仓库的流入和流出记录"""
         # 流入记录

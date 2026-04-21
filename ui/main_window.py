@@ -7,7 +7,7 @@ import random
 import json
 import shutil
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from PySide6.QtWidgets import (
      QMainWindow, QSplitter, QStackedWidget, QListWidget, QWidget,
@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (
     QGraphicsEllipseItem,  QGraphicsLineItem,QTextEdit,
     QMessageBox, QMenu,  QFileDialog, QDialog, QFormLayout,
     QComboBox, QSpinBox, QHeaderView, QInputDialog, QDateTimeEdit, QFrame,
+    QScrollArea,
 )
-from PySide6.QtCore import Qt, QTimer, QPointF, QDateTime
+from PySide6.QtCore import Qt, QTimer, QPointF, QDateTime, QRect
 from PySide6.QtGui import (
     QColor,
     QPen,
@@ -30,12 +31,120 @@ from PySide6.QtGui import (
     QLinearGradient,
     QIcon,
     QImageReader,
+    QGuiApplication,
 )
 
 from database import Database, InventoryManager
 from warehouse_manager import WarehouseManager
 from material_manager import MaterialManager
 from dispatch_manager import DispatchManager
+
+
+class WarehouseDispatchRecordsDialog(QDialog):
+    """仓库节点右键「调度记录」：大窗口 + 每条调度单独卡片分隔。"""
+
+    def __init__(
+        self,
+        warehouse_name: str,
+        warehouse_id: int,
+        records: List[Dict[str, Any]],
+        bulk: Dict[int, List[Dict[str, Any]]],
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"{warehouse_name} — 调度记录")
+        self.resize(820, 560)
+        self.setMinimumSize(640, 400)
+        self.setStyleSheet("QDialog { background-color: #f0f2f5; }")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        tip = QLabel(f"共 {len(records)} 条调度（可滚动查看）")
+        tip.setStyleSheet("font-size: 13px; color: #606266;")
+        root.addWidget(tip)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        v = QVBoxLayout(inner)
+        v.setSpacing(14)
+        v.setContentsMargins(4, 4, 8, 8)
+
+        for r in records:
+            rid = int(r["id"])
+            items = bulk.get(rid, [])
+            mat_raw = DispatchManager.format_items_summary(items) if items else ""
+            mat_cell = _format_dispatch_materials_qty_display(mat_raw) if mat_raw else "无"
+            role = "调出" if r.get("from_warehouse_id") == warehouse_id else "调入"
+            head = (
+                f"#{rid}　[{html.escape(role)}]　"
+                f"{html.escape(str(r.get('from_name') or ''))} → {html.escape(str(r.get('to_name') or ''))}"
+            )
+            sub = (
+                f"{html.escape(str(r.get('timestamp') or ''))}　"
+                f"执行人：{html.escape(str(r.get('executor') or ''))}"
+            )
+            mat_html = html.escape(mat_cell).replace("\n", "<br/>")
+
+            card = QFrame()
+            card.setObjectName("dispatchRecordCard")
+            card.setStyleSheet(
+                """
+                QFrame#dispatchRecordCard {
+                    background-color: #ffffff;
+                    border: 1px solid #dcdfe6;
+                    border-radius: 10px;
+                }
+                """
+            )
+            cv = QVBoxLayout(card)
+            cv.setContentsMargins(14, 12, 14, 12)
+            cv.setSpacing(6)
+            hl = QLabel(head)
+            hl.setTextFormat(Qt.RichText)
+            hl.setStyleSheet("font-size: 14px; font-weight: bold; color: #303133;")
+            hl.setWordWrap(True)
+            cv.addWidget(hl)
+            sl = QLabel(sub)
+            sl.setStyleSheet("font-size: 12px; color: #909399;")
+            sl.setWordWrap(True)
+            cv.addWidget(sl)
+            lab_m = QLabel("物料：")
+            lab_m.setStyleSheet(
+                "font-size: 13px; font-weight: bold; color: #606266; margin-top: 4px;"
+            )
+            cv.addWidget(lab_m)
+            ml = QLabel()
+            ml.setTextFormat(Qt.RichText)
+            ml.setText(mat_html)
+            ml.setStyleSheet("font-size: 13px; color: #409eff; line-height: 1.45; padding-left: 2px;")
+            ml.setWordWrap(True)
+            cv.addWidget(ml)
+            v.addWidget(card)
+
+        v.addStretch()
+        scroll.setWidget(inner)
+        root.addWidget(scroll, stretch=1)
+
+        row_btn = QHBoxLayout()
+        row_btn.addStretch()
+        btn = QPushButton("关闭")
+        btn.setMinimumWidth(120)
+        btn.setStyleSheet(
+            "QPushButton { background: #409eff; color: white; border: none; "
+            "border-radius: 6px; padding: 10px 24px; font-size: 14px; }"
+            "QPushButton:hover { background: #66b1ff; }"
+        )
+        btn.clicked.connect(self.accept)
+        row_btn.addWidget(btn)
+        root.addLayout(row_btn)
+
 
 def _dev_source_root() -> str:
     """含 main.py 与 ui 包的项目根（开发与源码运行）。"""
@@ -400,6 +509,23 @@ class WarehouseNode(QGraphicsEllipseItem):
     # 右键菜单
     def contextMenuEvent(self, event):
         menu = QMenu()
+        menu.setFont(QFont("Microsoft YaHei", 12))
+        menu.setMinimumWidth(180)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                padding: 2px 0px;
+            }
+            QMenu::item {
+                padding: 4px 18px 4px 10px;
+                min-height: 20px;
+            }
+            QMenu::item:selected {
+                background-color: #ecf5ff;
+                color: #409eff;
+            }
+            """
+        )
         change_color_action = menu.addAction("🔹 修改颜色")
         upload_avatar_action = menu.addAction("🖼 上传头像")
         clear_avatar_action = menu.addAction("🧹 清除头像")
@@ -527,11 +653,28 @@ class WarehouseNode(QGraphicsEllipseItem):
         QMessageBox.information(None, f"{self.name} 库存", f"库存数量: {self.inventory}")
 
     def show_dispatch_records(self):
-        if not self.dispatch_records:
-            text = "暂无调度记录"
-        else:
-            text = "\n".join([str(d) for d in self.dispatch_records])
-        QMessageBox.information(None, f"{self.name} 调度记录", text)
+        scene = self.scene()
+        mgr = getattr(scene, "dispatch_mgr", None) if scene is not None else None
+        if mgr is None:
+            QMessageBox.warning(
+                None,
+                f"{self.name} 调度记录",
+                "调度数据未就绪，请切换到「调度管理」页面后再试。",
+            )
+            return
+        wid = self.warehouse_id
+        try:
+            wid = int(wid)
+        except (TypeError, ValueError):
+            pass
+        records = mgr.list_dispatches_for_warehouse(wid)
+        if not records:
+            QMessageBox.information(None, f"{self.name} 调度记录", "暂无调度记录")
+            return
+        ids = [int(r["id"]) for r in records]
+        bulk = mgr.list_dispatch_items_for_records(ids)
+        dlg = WarehouseDispatchRecordsDialog(self.name, wid, records, bulk, None)
+        dlg.exec()
 
 # ------------------ 拓扑场景 ------------------
 class TopologyScene(QGraphicsScene):
@@ -540,6 +683,12 @@ class TopologyScene(QGraphicsScene):
         self.nodes = {}
         self.saved_layout = {}
         self.background_image = ""
+        # 从 warehouse_layout.json 的 __main_window__ 读出，供 MainWindow 启动时恢复
+        self.pending_main_window_geometry: Optional[Dict[str, Any]] = None
+        # 从 __scene__.dispatch_splitter_sizes 读出：拓扑图与调度记录表格的上下分割比例
+        self.pending_dispatch_splitter_sizes: Optional[List[int]] = None
+        # 由 MainWindow 在创建调度页后注入，供节点右键「调度记录」查询数据库
+        self.dispatch_mgr: Optional[Any] = None
 
     def build(self, warehouses: list[dict]):
         self.clear()
@@ -594,8 +743,12 @@ class TopologyScene(QGraphicsScene):
     def _layout_file_write() -> str:
         return os.path.join(user_data_root(), "warehouse_layout.json")
 
-    def save_layout_to_disk(self):
-        """保存所有节点位置和颜色到文件"""
+    def save_layout_to_disk(
+        self,
+        main_window: Optional[Any] = None,
+        dispatch_splitter_sizes: Optional[List[int]] = None,
+    ):
+        """保存所有节点位置和颜色到文件；可选写入主窗口几何与调度页上下分割条高度。"""
         data = {}
         for wh_id, node in self.nodes.items():
             data[wh_id] = {
@@ -607,9 +760,63 @@ class TopologyScene(QGraphicsScene):
                 "font_size": node.font_size,
                 "avatar_path": node.avatar_path,
             }
-        data["__scene__"] = {"background_image": self.background_image}
+
+        mw_state: Optional[Dict[str, Any]] = None
+        old_scene: Dict[str, Any] = {}
+        read_path = self._layout_file_read()
+        if os.path.isfile(read_path):
+            try:
+                with open(read_path, "r", encoding="utf-8") as fr:
+                    old = json.load(fr)
+                raw = old.get("__main_window__")
+                if isinstance(raw, dict):
+                    mw_state = raw
+                osc = old.get("__scene__")
+                if isinstance(osc, dict):
+                    old_scene = osc
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+
+        scene_out: Dict[str, Any] = {"background_image": self.background_image}
+        dss_old = old_scene.get("dispatch_splitter_sizes")
+        if isinstance(dss_old, list) and len(dss_old) >= 2:
+            try:
+                scene_out["dispatch_splitter_sizes"] = [int(dss_old[0]), int(dss_old[1])]
+            except (TypeError, ValueError):
+                pass
+        if dispatch_splitter_sizes is not None and len(dispatch_splitter_sizes) >= 2:
+            try:
+                scene_out["dispatch_splitter_sizes"] = [
+                    int(dispatch_splitter_sizes[0]),
+                    int(dispatch_splitter_sizes[1]),
+                ]
+            except (TypeError, ValueError):
+                pass
+        data["__scene__"] = scene_out
+
+        if main_window is not None:
+            try:
+                if main_window.isMaximized():
+                    g = main_window.normalGeometry()
+                else:
+                    g = main_window.geometry()
+                mw_state = {
+                    "x": int(g.x()),
+                    "y": int(g.y()),
+                    "width": int(g.width()),
+                    "height": int(g.height()),
+                    "maximized": bool(main_window.isMaximized()),
+                }
+            except Exception:
+                pass
+
+        if mw_state:
+            data["__main_window__"] = mw_state
+
         # 同步内存缓存，避免刷新时使用旧布局导致节点回退
-        self.saved_layout = {str(k): v for k, v in data.items() if k != "__scene__"}
+        self.saved_layout = {
+            str(k): v for k, v in data.items() if k not in ("__scene__", "__main_window__")
+        }
         path = self._layout_file_write()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -618,11 +825,21 @@ class TopologyScene(QGraphicsScene):
     def load_layout_from_disk(self):
         """读取布局和颜色，如果文件存在"""
         path = self._layout_file_read()
+        self.pending_main_window_geometry = None
+        self.pending_dispatch_splitter_sizes = None
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 self.saved_layout = json.load(f)
             scene_cfg = self.saved_layout.pop("__scene__", {})
             self.background_image = scene_cfg.get("background_image", "")
+            dss = scene_cfg.get("dispatch_splitter_sizes")
+            if isinstance(dss, list) and len(dss) >= 2:
+                try:
+                    self.pending_dispatch_splitter_sizes = [int(dss[0]), int(dss[1])]
+                except (TypeError, ValueError):
+                    self.pending_dispatch_splitter_sizes = None
+            mw = self.saved_layout.pop("__main_window__", None)
+            self.pending_main_window_geometry = mw if isinstance(mw, dict) else None
         else:
             self.saved_layout = {}
             self.background_image = ""
@@ -670,11 +887,12 @@ class MainWindow(QMainWindow):
         role_label = "管理员" if self._is_admin else "普通用户"
         uname = current_user.get("username") or ""
         self.setWindowTitle(f"🚚仓库物资调度管理系统 — {uname}（{role_label}）")
-        self.resize(1400, 850)
+        self.resize(1600, 850)
 
         # ==================== 添加工具栏 ====================
 
         self.init_ui()
+        self._restore_main_window_geometry_from_layout()
         self.refresh_all()          # 初始加载数据
 
     def init_ui(self):
@@ -717,6 +935,32 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_splitter)
 
         self.apply_styles()
+
+    def _restore_main_window_geometry_from_layout(self) -> None:
+        """若 warehouse_layout.json 含 __main_window__，恢复上次保存的主窗口大小与位置。"""
+        scene = getattr(self, "topology_scene", None)
+        if scene is None:
+            return
+        pending = getattr(scene, "pending_main_window_geometry", None)
+        if not pending or not isinstance(pending, dict):
+            return
+        try:
+            x = int(pending["x"])
+            y = int(pending["y"])
+            w = int(pending["width"])
+            h = int(pending["height"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if w < 480 or h < 360:
+            return
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            ag = screen.availableGeometry()
+            if not ag.intersects(QRect(x, y, w, h)):
+                return
+        self.setGeometry(x, y, w, h)
+        if pending.get("maximized") in (True, "true", 1, "1"):
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
     # ====================== 下面保持你原来的代码不变 ======================
 
@@ -1157,11 +1401,13 @@ class MainWindow(QMainWindow):
         top_layout.addLayout(right_bar)
 
         # ==================== 主内容：拓扑图 + 表格 ====================
-        splitter = QSplitter(Qt.Vertical)
+        self.dispatch_page_splitter = QSplitter(Qt.Vertical)
+        splitter = self.dispatch_page_splitter
 
         # 上方：拓扑图（展示仓库节点）
         # 上方：拓扑图（展示仓库节点）
         self.topology_scene = TopologyScene()
+        self.topology_scene.dispatch_mgr = self.dispatch_mgr
         self.topology_scene.load_layout_from_disk()   # 先读取保存的布局和颜色
 
         warehouses = self.warehouse_mgr.list_warehouses()
@@ -1213,7 +1459,11 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(self.topology_view)
         splitter.addWidget(self.dispatch_table)
-        splitter.setSizes([420, 150])   # 调整上下比例
+        pending_ss = getattr(self.topology_scene, "pending_dispatch_splitter_sizes", None)
+        if pending_ss and len(pending_ss) >= 2:
+            splitter.setSizes([pending_ss[0], pending_ss[1]])
+        else:
+            splitter.setSizes([420, 150])   # 默认上下比例
 
         layout.addLayout(top_layout)
         layout.addWidget(splitter)
@@ -1406,8 +1656,18 @@ class MainWindow(QMainWindow):
         self.topology_scene.set_background_image("")
 
     def save_topology_layout(self):
-        self.topology_scene.save_layout_to_disk()
-        QMessageBox.information(self, "成功", "当前布局已保存")
+        sp_sizes: Optional[List[int]] = None
+        sp = getattr(self, "dispatch_page_splitter", None)
+        if sp is not None:
+            ss = sp.sizes()
+            if isinstance(ss, list) and len(ss) >= 2:
+                sp_sizes = [int(ss[0]), int(ss[1])]
+        self.topology_scene.save_layout_to_disk(self, dispatch_splitter_sizes=sp_sizes)
+        QMessageBox.information(
+            self,
+            "成功",
+            "当前布局、主窗口大小与调度记录列表区域比例已保存，下次启动将自动恢复。",
+        )
 
     def export_dispatch_excel(self):
         """每单占一行：全部物料合并在一格（换行），与早期导出一致。"""
@@ -2446,7 +2706,8 @@ class DispatchDetailDialog(QDialog):
         self.material_mgr = parent.material_mgr
         self.dispatch_mgr = parent.dispatch_mgr
         self.setWindowTitle(f"调度详情 - 单号 {data['id']}")
-        self.resize(560, 620)
+        self.resize(720, 680)
+        self.setMinimumSize(560, 480)
 
         # 设置窗口背景色
         self.setStyleSheet("background-color: #ffffff;")
@@ -2509,11 +2770,13 @@ class DispatchDetailDialog(QDialog):
             font-size: 13px;
             font-weight: bold;
             color: #2c3e50;
-            margin-top: 0px;
+            margin-top: 4px;
             padding-top: 0px;
+            padding-bottom: 0px;
         """)
         layout.addWidget(detail_title)
-        
+        layout.addSpacing(4)
+
         self.detail_text = QTextEdit()
 
         def format_materials_from_db() -> str:
@@ -2564,7 +2827,25 @@ class DispatchDetailDialog(QDialog):
         if not clean_materials.strip():
             clean_materials = format_materials_fallback(data.get("materials") or "")
 
-        self.detail_text.setPlainText(clean_materials)
+        # 每条物料一行一块，带底部分隔线（比纯文本更易区分「每笔」）
+        mat_html_parts: List[str] = []
+        for raw_line in clean_materials.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            esc = html.escape(line)
+            mat_html_parts.append(
+                f'<div style="border-bottom:1px solid #ebeef5;padding:8px 4px;font-size:14px;">{esc}</div>'
+            )
+        if not mat_html_parts:
+            mat_html_parts.append(
+                '<div style="color:#909399;padding:8px;">（无明细）</div>'
+            )
+        self.detail_text.setHtml(
+            '<div style="font-family:\'Microsoft YaHei\',\'Segoe UI\',sans-serif;">'
+            + "".join(mat_html_parts)
+            + "</div>"
+        )
         self.detail_text.setReadOnly(True)
         
         # 2. 修改列表内容字体：将 font-size 改为 15px 或 16px
@@ -2580,7 +2861,7 @@ class DispatchDetailDialog(QDialog):
                 font-family: "Segoe UI", "Microsoft YaHei", "Arial Unicode MS", "SimHei";
             }
         """)
-        self.detail_text.setMinimumHeight(160)
+        self.detail_text.setMinimumHeight(220)
         layout.addWidget(self.detail_text, stretch=1)
 
         # --- 底部按钮 ---
