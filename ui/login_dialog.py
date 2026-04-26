@@ -10,9 +10,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFormLayout,
     QMessageBox,
+    QCheckBox,
 )
 from PySide6.QtCore import Qt
 
+import remembered_credentials
 from auth_service import AuthManager
 
 
@@ -24,7 +26,7 @@ class LoginDialog(QDialog):
 
         self.setWindowTitle("登录")
         self.setModal(True)
-        self.resize(400, 200)
+        self.resize(400, 260)
         self.setStyleSheet(
             """
             QDialog {
@@ -56,6 +58,15 @@ class LoginDialog(QDialog):
                 border-color: #c6e2ff;
                 background-color: #ecf5ff;
             }
+            QCheckBox {
+                color: #303133;
+                font-size: 13px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
             """
         )
 
@@ -74,8 +85,12 @@ class LoginDialog(QDialog):
         self.pass_edit.setPlaceholderText("密码")
         self.pass_edit.setEchoMode(QLineEdit.Password)
         form.addRow("用户名：", self.user_edit)
-        form.addRow("密　码：", self.pass_edit)
+        form.addRow("密码：", self.pass_edit)
         layout.addLayout(form)
+
+        self.remember_cb = QCheckBox("记住账号和密码（保存在本机，勿在公用电脑勾选）")
+        self.remember_cb.setChecked(False)
+        layout.addWidget(self.remember_cb)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -95,6 +110,20 @@ class LoginDialog(QDialog):
 
         self.pass_edit.returnPressed.connect(self._try_login)
 
+        self._apply_remembered()
+
+    def _apply_remembered(self) -> None:
+        data = remembered_credentials.load()
+        if not data.get("remember"):
+            return
+        u = str(data.get("username") or "").strip()
+        pw = remembered_credentials.decode_password(data)
+        if u:
+            self.user_edit.setText(u)
+        if pw:
+            self.pass_edit.setText(pw)
+        self.remember_cb.setChecked(True)
+
     def get_user(self) -> Optional[Dict[str, Any]]:
         return self._user
 
@@ -111,4 +140,15 @@ class LoginDialog(QDialog):
             self.pass_edit.setFocus()
             return
         self._user = user
+        db_path = ""
+        try:
+            db_path = str(getattr(self.auth_mgr.db, "db_path", "") or "")
+        except Exception:
+            pass
+        remembered_credentials.save(
+            self.remember_cb.isChecked(),
+            db_path,
+            name,
+            pwd,
+        )
         self.accept()

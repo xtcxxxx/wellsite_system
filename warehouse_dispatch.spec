@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
+# 本仓库纯客户端：固定输出目录与 exe 名称
+_app_dist_name = "仓库物资调度-客户端"
+
 
 def _project_data_files(project_root):
     """将项目内非 Python 数据文件打进包（排除 venv / 构建输出 / 本地数据库）。"""
     skip_dirs = {".venv", "dist", "build", "__pycache__", ".git", ".cursor"}
-    skip_files = {"wellsite.db"}
+    skip_files = {"wellsite.db", "remembered_login.json"}
     out = []
     for dirpath, dirnames, filenames in os.walk(project_root):
         dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs)
         for fn in filenames:
             if fn.endswith(".pyc") or fn.endswith(".py"):
+                continue
+            if fn.endswith(".spec"):
                 continue
             if fn in skip_files:
                 continue
@@ -23,7 +28,7 @@ def _project_data_files(project_root):
     return out
 
 
-_bundle = _project_data_files(SPECPATH)
+_bundle = list(_project_data_files(SPECPATH))
 
 _app_icon = os.path.normpath(os.path.join(SPECPATH, "assets", "app.ico"))
 
@@ -32,7 +37,7 @@ a = Analysis(
     pathex=[SPECPATH],
     binaries=[],
     datas=_bundle,
-    hiddenimports=["openpyxl.cell._writer"],
+    hiddenimports=["openpyxl.cell._writer", "runtime_flags", "remembered_credentials"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -47,7 +52,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="仓库物资调度",
+    name=_app_dist_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -67,5 +72,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="仓库物资调度",
+    name=_app_dist_name,
 )

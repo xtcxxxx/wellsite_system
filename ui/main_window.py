@@ -6,6 +6,7 @@ import math
 import random
 import json
 import shutil
+import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,7 @@ from PySide6.QtGui import (
 )
 
 from database import Database, InventoryManager
+from auth_service import hash_password
 from warehouse_manager import WarehouseManager
 from material_manager import MaterialManager
 from dispatch_manager import DispatchManager
@@ -209,46 +211,98 @@ def window_icon_qicon() -> QIcon:
 
 
 def bootstrap_frozen_resources() -> None:
-    """冻结模式下首次运行：若 exe 旁尚无「Picture record」内容，则从包内复制一份。"""
-    if not getattr(sys, "frozen", False):
-        return
-    dest = os.path.join(user_data_root(), "Picture record")
-    src = os.path.join(bundle_root(), "Picture record")
-    if not os.path.isdir(src):
-        return
+    """仅 wellsite.db 与 Picture record 使用共享路径；布局与备份页配置在本机 exe 旁，无需从包内复制。"""
+    return
+
+
+NETWORK_SETTINGS_FILE = os.path.join(user_data_root(), "network_settings.json")
+
+
+def _read_network_settings_file() -> dict:
+    if not os.path.isfile(NETWORK_SETTINGS_FILE):
+        return {}
     try:
-        existing = os.listdir(dest) if os.path.isdir(dest) else []
-    except OSError:
-        return
-    if existing:
-        return
+        with open(NETWORK_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def network_db_path_from_settings() -> str:
+    from runtime_flags import resolved_shared_database_path
+
+    return resolved_shared_database_path()
+
+
+def is_network_data_enabled() -> bool:
+    from runtime_flags import resolved_shared_database_path
+
+    return bool(resolved_shared_database_path())
+
+
+def shared_data_root() -> str:
+    """与 wellsite.db 同目录（共享 UNC 根）。仅用于 Picture record 等与库同机路径。"""
+    from runtime_flags import shared_pack_data_root
+
+    return shared_pack_data_root()
+
+
+def backup_ui_settings_file() -> str:
+    return os.path.join(user_data_root(), "backup_ui_settings.json")
+
+
+def dispatch_photo_dir() -> str:
+    r = shared_data_root()
+    return os.path.join(r, "Picture record") if r else ""
+
+
+def warehouse_layout_file() -> str:
+    return os.path.join(user_data_root(), "warehouse_layout.json")
+
+
+def shared_background_dir() -> str:
+    return os.path.join(user_data_root(), "Background images")
+
+
+def copy_file_to_shared(src_path: str, subdir: str) -> str:
+    """将文件复制到本机数据目录（exe 旁）下的子目录，例如 Background images。"""
+    r = user_data_root()
+    ap = os.path.abspath(os.path.normpath(src_path))
+    root = os.path.abspath(os.path.join(r, subdir))
+    os.makedirs(root, exist_ok=True)
     try:
-        os.makedirs(dest, exist_ok=True)
-        for name in os.listdir(src):
-            sp, dp = os.path.join(src, name), os.path.join(dest, name)
-            if os.path.isfile(sp):
-                shutil.copy2(sp, dp)
-            elif os.path.isdir(sp):
-                shutil.copytree(sp, dp)
-    except OSError:
+        if os.path.normcase(ap).startswith(os.path.normcase(root + os.sep)):
+            return ap
+    except (OSError, ValueError):
         pass
-
-
-BACKUP_UI_SETTINGS_FILE = os.path.join(user_data_root(), "backup_ui_settings.json")
-DISPATCH_PHOTO_DIR = os.path.join(user_data_root(), "Picture record")
+    base = os.path.basename(ap)
+    safe = re.sub(r"[^\w\-\.()\u4e00-\u9fff]", "_", base).strip("._") or "file"
+    stem, ext = os.path.splitext(safe)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = os.path.join(root, f"{ts}_{stem}{ext}")
+    n = 0
+    while os.path.exists(dest):
+        n += 1
+        dest = os.path.join(root, f"{ts}_{stem}_{n}{ext}")
+    shutil.copy2(ap, dest)
+    return os.path.abspath(dest)
 
 
 def store_dispatch_photo(src_path: Optional[str]) -> Optional[str]:
     """
-    将调度附图复制到项目下 Picture record，返回绝对路径写入数据库。
-    若已在该目录内则直接返回原路径；无图或源不存在则返回 None。
+    将调度附图复制到与 wellsite.db 同目录下的 Picture record，返回绝对路径写入数据库。
+    若已在该目录内则直接返回原路径；无图、源不存在或未配置共享库路径则返回 None。
     """
     if not src_path:
         return None
     ap = os.path.abspath(os.path.normpath(src_path))
     if not os.path.isfile(ap):
         return None
-    dest_root = os.path.abspath(DISPATCH_PHOTO_DIR)
+    dest_root = dispatch_photo_dir()
+    if not dest_root:
+        return None
+    dest_root = os.path.abspath(dest_root)
     os.makedirs(dest_root, exist_ok=True)
     try:
         if os.path.normcase(ap).startswith(os.path.normcase(dest_root + os.sep)):
@@ -321,7 +375,7 @@ class BackupPageRoot(QWidget):
                 pm = QPixmap(ap)
                 if not pm.isNull():
                     self._bg_pixmap = pm
-        if self._bg_pixmap is None:
+        if self._bg_pixmap is None and not is_network_data_enabled():
             for fname in ("backup_bg.jpg", "backup_bg.png", "home_bg.jpg", "home_bg.png"):
                 p = asset_path("assets", fname)
                 if os.path.isfile(p):
@@ -733,15 +787,17 @@ class TopologyScene(QGraphicsScene):
 
     @staticmethod
     def _layout_file_read() -> str:
-        user = os.path.join(user_data_root(), "warehouse_layout.json")
-        if os.path.isfile(user):
+        user = warehouse_layout_file()
+        if user and os.path.isfile(user):
             return user
         bundled = os.path.join(bundle_root(), "warehouse_layout.json")
-        return bundled if os.path.isfile(bundled) else user
+        if os.path.isfile(bundled):
+            return bundled
+        return user or bundled
 
     @staticmethod
     def _layout_file_write() -> str:
-        return os.path.join(user_data_root(), "warehouse_layout.json")
+        return warehouse_layout_file()
 
     def save_layout_to_disk(
         self,
@@ -818,6 +874,8 @@ class TopologyScene(QGraphicsScene):
             str(k): v for k, v in data.items() if k not in ("__scene__", "__main_window__")
         }
         path = self._layout_file_write()
+        if not path:
+            return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -874,6 +932,7 @@ class MainWindow(QMainWindow):
         material_mgr: MaterialManager,
         dispatch_mgr: DispatchManager,
         current_user: Dict[str, Any],
+        post_login_network_hint: bool = False,
     ):
         super().__init__()
 
@@ -894,6 +953,17 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self._restore_main_window_geometry_from_layout()
         self.refresh_all()          # 初始加载数据
+        if post_login_network_hint:
+            QTimer.singleShot(400, self._show_post_login_network_hint)
+
+    def _show_post_login_network_hint(self) -> None:
+        QMessageBox.information(
+            self,
+            "配置网络共享",
+            "请打开左侧「网络设置」，填写主机共享的 wellsite.db 路径并保存。\n"
+            "保存后请重启软件，以便使用主机上的数据、布局与图片记录。\n\n"
+            "管理员与普通用户均可在此配置。",
+        )
 
     def init_ui(self):
         # 主分割器（左侧菜单 + 右侧内容）
@@ -901,14 +971,18 @@ class MainWindow(QMainWindow):
 
         # 左侧侧边栏
         self.sidebar = QListWidget()
-        self.sidebar.addItems([
+        sidebar_items = [
             "🏠 首页",
             "🏭 仓库管理",
             "📦 物料管理",
             "🚛 调度管理",
             "🔍 搜索查询",
-            "💾 数据备份"
-        ])
+            "💾 数据备份",
+        ]
+        if self._is_admin:
+            sidebar_items.append("👤 账号分配")
+        sidebar_items.append("🌐 网络设置")
+        self.sidebar.addItems(sidebar_items)
         self.sidebar.setMaximumWidth(200)
         self.sidebar.setCurrentRow(0)
 
@@ -920,6 +994,9 @@ class MainWindow(QMainWindow):
         self.page_dispatch = self.create_dispatch_page()
         self.page_search = self.create_search_page()
         self.page_backup = self.create_backup_page()
+        if self._is_admin:
+            self.page_accounts = self.create_account_page()
+        self.page_network = self.create_network_settings_page()
         
 
         self.stack.addWidget(self.page_home)
@@ -928,6 +1005,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.page_dispatch)
         self.stack.addWidget(self.page_search)
         self.stack.addWidget(self.page_backup)
+        if self._is_admin:
+            self.stack.addWidget(self.page_accounts)
+        self.stack.addWidget(self.page_network)
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
 
         main_splitter.addWidget(self.sidebar)
@@ -1671,7 +1751,12 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        self.topology_scene.set_background_image(path)
+        try:
+            stored = copy_file_to_shared(path, "Background images")
+        except OSError as e:
+            QMessageBox.critical(self, "保存失败", f"无法复制背景图片到本机数据目录：\n{e}")
+            return
+        self.topology_scene.set_background_image(stored)
 
     def clear_topology_background(self):
         self.topology_scene.set_background_image("")
@@ -1927,17 +2012,22 @@ class MainWindow(QMainWindow):
     
 
     def _read_backup_ui_settings(self) -> dict:
-        if not os.path.isfile(BACKUP_UI_SETTINGS_FILE):
+        path = backup_ui_settings_file()
+        if not path or not os.path.isfile(path):
             return {}
         try:
-            with open(BACKUP_UI_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
 
     def _write_backup_ui_settings(self, data: dict) -> None:
-        with open(BACKUP_UI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        path = backup_ui_settings_file()
+        if not path:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _apply_backup_page_background(self, widget: QWidget) -> None:
@@ -1949,7 +2039,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择备份页背景图片",
-            user_data_root(),
+            shared_background_dir() if os.path.isdir(shared_background_dir()) else user_data_root(),
             "Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*.*)",
         )
         if not path:
@@ -1967,11 +2057,16 @@ class MainWindow(QMainWindow):
                 "请换用 PNG / JPG 等常见格式。",
             )
             return
+        try:
+            stored = copy_file_to_shared(norm, "Background images")
+        except OSError as e:
+            QMessageBox.critical(self, "保存失败", f"无法复制背景图片到本机数据目录：\n{e}")
+            return
         data = self._read_backup_ui_settings()
-        data["background_image"] = norm
+        data["background_image"] = stored
         self._write_backup_ui_settings(data)
         self._apply_backup_page_background(page)
-        QMessageBox.information(self, "成功", "备份页背景已更新。\n路径已保存到 backup_ui_settings.json")
+        QMessageBox.information(self, "成功", "备份页背景已更新。\n图片与 backup_ui_settings.json 已保存在本机 exe 旁。")
 
     def _clear_backup_page_background(self, page: QWidget) -> None:
         data = self._read_backup_ui_settings()
@@ -2021,7 +2116,7 @@ class MainWindow(QMainWindow):
         hint.setWordWrap(True)
         hint.setStyleSheet("font-size: 15px; color: #606266; background: transparent;")
 
-        tip_bg = QLabel("背景路径保存在项目根目录 backup_ui_settings.json，可随时更换。")
+        tip_bg = QLabel("背景路径保存在本机 exe 旁的 backup_ui_settings.json，可随时更换。")
         tip_bg.setAlignment(Qt.AlignCenter)
         tip_bg.setWordWrap(True)
         tip_bg.setStyleSheet("font-size: 12px; color: #909399; background: transparent;")
@@ -2033,6 +2128,437 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return widget
+
+    def create_account_page(self):
+        """管理员账号分配：新增账号、删除账号。"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setSpacing(16)
+
+        title = QLabel("👤 账号分配")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #303133;")
+        layout.addWidget(title)
+
+        add_box = QGroupBox("添加账号")
+        add_layout = QVBoxLayout(add_box)
+        form = QFormLayout()
+        self.account_username_edit = QLineEdit()
+        self.account_username_edit.setPlaceholderText("请输入用户名")
+        self.account_password_edit = QLineEdit()
+        self.account_password_edit.setPlaceholderText("请输入密码")
+        self.account_password_edit.setEchoMode(QLineEdit.Password)
+        self.account_role_combo = QComboBox()
+        self.account_role_combo.addItem("普通用户", "user")
+        self.account_role_combo.addItem("管理员", "admin")
+        form.addRow("用户名：", self.account_username_edit)
+        form.addRow("密码：", self.account_password_edit)
+        form.addRow("角色：", self.account_role_combo)
+        add_layout.addLayout(form)
+
+        add_row = QHBoxLayout()
+        add_row.addStretch()
+        btn_add_account = QPushButton("添加账号")
+        btn_add_account.clicked.connect(self.add_account)
+        add_row.addWidget(btn_add_account)
+        add_layout.addLayout(add_row)
+        layout.addWidget(add_box)
+
+        list_box = QGroupBox("账号列表")
+        list_layout = QVBoxLayout(list_box)
+        self.account_table = QTableWidget(0, 3)
+        self.account_table.setHorizontalHeaderLabels(["ID", "用户名", "角色"])
+        self.account_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.account_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.account_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.account_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.account_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.account_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        list_layout.addWidget(self.account_table)
+
+        list_btn_row = QHBoxLayout()
+        btn_refresh = QPushButton("刷新列表")
+        btn_delete = QPushButton("删除选中账号")
+        btn_delete.setStyleSheet("background: #f56c6c;")
+        btn_refresh.clicked.connect(self.load_accounts)
+        btn_delete.clicked.connect(self.delete_selected_account)
+        list_btn_row.addStretch()
+        list_btn_row.addWidget(btn_refresh)
+        list_btn_row.addWidget(btn_delete)
+        list_layout.addLayout(list_btn_row)
+        layout.addWidget(list_box, stretch=1)
+
+        tip = QLabel("提示：删除账号不会删除该账号过去创建的调度记录。为了安全，不能删除当前登录账号，也不能删除最后一个管理员。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #606266; font-size: 13px;")
+        layout.addWidget(tip)
+
+        self.load_accounts()
+        return widget
+
+    def load_accounts(self) -> None:
+        if not hasattr(self, "account_table"):
+            return
+        rows = self.db.fetchall(
+            """
+            SELECT id, username, role
+            FROM users
+            ORDER BY LOWER(username)
+            """
+        )
+        self.account_table.setRowCount(0)
+        for row_data in rows:
+            row = self.account_table.rowCount()
+            self.account_table.insertRow(row)
+            role = (row_data["role"] or "user").strip().lower()
+            role_label = "管理员" if role == "admin" else "普通用户"
+            values = [str(row_data["id"]), row_data["username"], role_label]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, int(row_data["id"]))
+                self.account_table.setItem(row, col, item)
+
+    def add_account(self) -> None:
+        if not self._ensure_admin():
+            return
+        username = self.account_username_edit.text().strip()
+        password = self.account_password_edit.text()
+        role = self.account_role_combo.currentData() or "user"
+        if not username or not password:
+            QMessageBox.warning(self, "提示", "请输入用户名和密码。")
+            return
+        if len(password) < 4:
+            QMessageBox.warning(self, "提示", "密码至少 4 位。")
+            return
+        try:
+            self.db.execute(
+                "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+                (username, hash_password(password), role),
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "UNIQUE" in msg.upper():
+                QMessageBox.warning(self, "添加失败", "用户名已存在，请换一个用户名。")
+            else:
+                QMessageBox.critical(self, "添加失败", msg)
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "添加失败", str(e))
+            return
+
+        self.account_username_edit.clear()
+        self.account_password_edit.clear()
+        self.account_role_combo.setCurrentIndex(0)
+        self.load_accounts()
+        QMessageBox.information(self, "成功", f"账号「{username}」已添加。")
+
+    def delete_selected_account(self) -> None:
+        if not self._ensure_admin():
+            return
+        row = self.account_table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "提示", "请先选择要删除的账号。")
+            return
+        id_item = self.account_table.item(row, 0)
+        name_item = self.account_table.item(row, 1)
+        role_item = self.account_table.item(row, 2)
+        if id_item is None or name_item is None or role_item is None:
+            QMessageBox.warning(self, "提示", "无法读取选中的账号。")
+            return
+        user_id = int(id_item.text())
+        username = name_item.text()
+        role_label = role_item.text()
+        if user_id == int(self.current_user.get("id") or 0):
+            QMessageBox.warning(self, "无法删除", "不能删除当前正在登录的账号。")
+            return
+        if role_label == "管理员":
+            admin_count = self.db.fetch_scalar(
+                "SELECT COUNT(*) FROM users WHERE LOWER(role) = 'admin'"
+            )
+            if int(admin_count or 0) <= 1:
+                QMessageBox.warning(self, "无法删除", "不能删除最后一个管理员账号。")
+                return
+
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定删除账号「{username}」吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        except Exception as e:
+            QMessageBox.critical(self, "删除失败", str(e))
+            return
+        self.load_accounts()
+        QMessageBox.information(self, "成功", f"账号「{username}」已删除。")
+
+    def _read_network_settings(self) -> dict:
+        if not os.path.isfile(NETWORK_SETTINGS_FILE):
+            return {}
+        try:
+            with open(NETWORK_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_network_settings(self, data: dict) -> None:
+        payload = dict(data)
+        payload["client"] = True
+        with open(NETWORK_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _configured_network_db_path(self) -> str:
+        data = self._read_network_settings()
+        if data.get("enabled") is False:
+            return ""
+        return str(data.get("db_path") or "").strip()
+
+    def _refresh_network_settings_labels(self) -> None:
+        current = os.path.abspath(os.path.normpath(getattr(self.db, "db_path", "")))
+        saved = self._configured_network_db_path()
+        if hasattr(self, "network_current_db_label"):
+            self.network_current_db_label.setText(current)
+        if hasattr(self, "network_saved_db_label"):
+            if saved:
+                lab = saved
+            else:
+                lab = "仅使用共享数据库（见 network_settings.json）"
+            self.network_saved_db_label.setText(lab)
+        if hasattr(self, "network_db_path_edit") and saved:
+            self.network_db_path_edit.setText(saved)
+
+    def create_network_settings_page(self):
+        """网络数据库设置：保存共享 wellsite.db 路径，下次启动时生效。"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setSpacing(16)
+
+        title = QLabel("🌐 网络设置")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #303133;")
+        layout.addWidget(title)
+
+        current_box = QGroupBox("当前数据库")
+        current_layout = QFormLayout(current_box)
+        self.network_current_db_label = QLabel("")
+        self.network_current_db_label.setWordWrap(True)
+        self.network_current_db_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.network_saved_db_label = QLabel("")
+        self.network_saved_db_label.setWordWrap(True)
+        self.network_saved_db_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        current_layout.addRow("本次正在使用：", self.network_current_db_label)
+        current_layout.addRow("已保存的网络路径：", self.network_saved_db_label)
+        layout.addWidget(current_box)
+
+        setting_box = QGroupBox("设置共享数据库路径")
+        setting_layout = QVBoxLayout(setting_box)
+        form = QFormLayout()
+        self.network_db_path_edit = QLineEdit()
+        self.network_db_path_edit.setPlaceholderText(r"例如：\\192.168.1.20\wellsite_share\wellsite.db")
+        form.addRow("共享数据库：", self.network_db_path_edit)
+        setting_layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        btn_browse = QPushButton("选择数据库文件")
+        btn_save = QPushButton("保存设置")
+        btn_copy = QPushButton("复制当前库到此路径并保存")
+        btn_clear = QPushButton("关闭网络设置")
+        btn_clear.setStyleSheet("background: #909399;")
+        btn_browse.clicked.connect(self.pick_network_db_path)
+        btn_save.clicked.connect(self.save_network_settings)
+        btn_copy.clicked.connect(self.copy_current_db_to_network_path)
+        btn_clear.clicked.connect(self.clear_network_settings)
+        btn_row.addWidget(btn_browse)
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_clear)
+        setting_layout.addLayout(btn_row)
+        btn_clear.hide()
+        btn_copy.hide()
+        layout.addWidget(setting_box)
+
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setMinimumHeight(190)
+        help_text.setText(
+            "使用方法：\n"
+            "1. 在主机上建立共享文件夹（例如 D:\\wellsite_share），并保证本机对该共享有读写权限。\n"
+            "2. 在此填写主机上的 wellsite.db 路径，例如 \\\\192.168.1.20\\wellsite_share\\wellsite.db。\n"
+            "3. 共享路径下必须已存在主机创建好的 wellsite.db；本程序不会把本机库复制到共享（请在主机端维护库）。\n"
+            "4. 保存后需重启软件才会使用新的共享路径。\n\n"
+            "启用后，仅在共享路径与 wellsite.db 同目录读写：wellsite.db 与调度附图目录 Picture record。\n"
+            "仓库布局 warehouse_layout.json、备份页配置 backup_ui_settings.json、拓扑/备份页背景图 Background images 均在本机 exe 旁，各客户端独立。\n"
+            "不能在此关闭网络改单机；若已保存共享路径但主机不可达，程序将无法启动。\n"
+            "首次无配置时会弹出「连接共享数据库」向导。\n\n"
+            "提醒：主机宜固定 IP；SQLite 适合少量人同时使用。"
+        )
+        layout.addWidget(help_text)
+        layout.addStretch()
+
+        saved = self._configured_network_db_path()
+        if saved:
+            self.network_db_path_edit.setText(saved)
+        self._refresh_network_settings_labels()
+        return widget
+
+    def pick_network_db_path(self) -> None:
+        initial = self.network_db_path_edit.text().strip() or shared_data_root() or user_data_root()
+        if os.path.isfile(initial):
+            initial = os.path.dirname(initial)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择共享数据库 wellsite.db",
+            initial,
+            "SQLite Database (*.db);;All Files (*.*)",
+        )
+        if path:
+            self.network_db_path_edit.setText(os.path.normpath(path))
+
+    def _network_path_from_edit(self) -> str:
+        raw = self.network_db_path_edit.text().strip()
+        if not raw:
+            return ""
+        return os.path.normpath(os.path.expandvars(raw))
+
+    def save_network_settings(self) -> None:
+        path = self._network_path_from_edit()
+        if not path:
+            QMessageBox.warning(self, "提示", "请填写共享数据库路径。")
+            return
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            QMessageBox.warning(self, "路径无效", f"找不到共享文件夹：\n{parent}")
+            return
+        if not os.path.isfile(path):
+            QMessageBox.warning(
+                self,
+                "数据库不存在",
+                "共享路径下还没有 wellsite.db。\n\n"
+                "请在主机上点击“复制当前库到此路径并保存”，客户端只连接已有的主机数据库。",
+            )
+            return
+        self._write_network_settings({"enabled": True, "db_path": path})
+        self._refresh_network_settings_labels()
+        QMessageBox.information(self, "已保存", "网络数据库路径已保存。\n请重启软件后生效。")
+
+    def clear_network_settings(self) -> None:
+        QMessageBox.warning(
+            self,
+            "提示",
+            "本程序仅允许使用共享数据库，不能关闭网络设置。",
+        )
+
+    def _copy_file_to_target_root(self, src_path: str, target_root: str, subdir: str) -> str:
+        ap = os.path.abspath(os.path.normpath(src_path))
+        dest_root = os.path.abspath(os.path.join(target_root, subdir))
+        os.makedirs(dest_root, exist_ok=True)
+        base = os.path.basename(ap)
+        safe = re.sub(r"[^\w\-\.()\u4e00-\u9fff]", "_", base).strip("._") or "file"
+        stem, ext = os.path.splitext(safe)
+        dest = os.path.join(dest_root, safe)
+        n = 0
+        while os.path.exists(dest):
+            n += 1
+            dest = os.path.join(dest_root, f"{stem}_{n}{ext}")
+        shutil.copy2(ap, dest)
+        return os.path.abspath(dest)
+
+    def _copy_support_files_to_network_root(
+        self, dest_db_path: str, target_root: str, src_db_path: str
+    ) -> None:
+        """将调度附图迁到目标共享根下的 Picture record；布局与备份页 JSON 保留在本机。"""
+        os.makedirs(target_root, exist_ok=True)
+
+        copied_photo_paths: Dict[str, str] = {}
+        src_parent = os.path.dirname(os.path.abspath(os.path.normpath(src_db_path)))
+        photo_dirs: List[str] = []
+        if src_parent:
+            photo_dirs.append(os.path.join(src_parent, "Picture record"))
+        photo_dirs.append(os.path.join(user_data_root(), "Picture record"))
+        seen: set[str] = set()
+        for root_dir in photo_dirs:
+            rd = os.path.abspath(os.path.normpath(root_dir))
+            if not rd or rd in seen:
+                continue
+            seen.add(rd)
+            if not os.path.isdir(rd):
+                continue
+            for name in os.listdir(rd):
+                src = os.path.join(rd, name)
+                if not os.path.isfile(src):
+                    continue
+                copied = self._copy_file_to_target_root(src, target_root, "Picture record")
+                copied_photo_paths[os.path.normcase(os.path.abspath(src))] = copied
+
+        # 数据库里保存的是图片绝对路径，迁移时同步改成目标共享目录下的路径。
+        with sqlite3.connect(dest_db_path) as conn:
+            cur = conn.execute(
+                "SELECT id, image_path FROM dispatch_records "
+                "WHERE image_path IS NOT NULL AND TRIM(image_path) <> ''"
+            )
+            updates = []
+            for rid, img_path in cur.fetchall():
+                raw = str(img_path or "").strip()
+                if not raw or not os.path.isfile(raw):
+                    continue
+                copied = copied_photo_paths.get(
+                    os.path.normcase(os.path.abspath(os.path.normpath(raw)))
+                )
+                if not copied:
+                    copied = self._copy_file_to_target_root(raw, target_root, "Picture record")
+                updates.append((copied, int(rid)))
+            if updates:
+                conn.executemany(
+                    "UPDATE dispatch_records SET image_path = ? WHERE id = ?",
+                    updates,
+                )
+                conn.commit()
+
+    def copy_current_db_to_network_path(self) -> None:
+        dest = self._network_path_from_edit()
+        if not dest:
+            QMessageBox.warning(self, "提示", "请先填写要保存到共享文件夹的数据库路径。")
+            return
+        parent = os.path.dirname(dest)
+        if parent and not os.path.isdir(parent):
+            QMessageBox.warning(self, "路径无效", f"找不到共享文件夹：\n{parent}")
+            return
+
+        src = os.path.abspath(os.path.normpath(getattr(self.db, "db_path", "")))
+        dest_abs = os.path.abspath(os.path.normpath(dest))
+        if os.path.normcase(src) == os.path.normcase(dest_abs):
+            QMessageBox.information(self, "提示", "当前已经在使用这个数据库路径。")
+            return
+        if os.path.exists(dest_abs):
+            reply = QMessageBox.question(
+                self,
+                "确认覆盖",
+                f"目标文件已存在，是否覆盖？\n{dest_abs}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        try:
+            with sqlite3.connect(dest_abs) as dest_conn:
+                self.db.conn.backup(dest_conn)
+            self._copy_support_files_to_network_root(dest_abs, os.path.dirname(dest_abs), src)
+        except Exception as e:
+            QMessageBox.critical(self, "复制失败", f"无法复制数据库或 Picture record：\n{e}")
+            return
+
+        self._write_network_settings({"enabled": True, "db_path": dest_abs})
+        self._refresh_network_settings_labels()
+        QMessageBox.information(
+            self,
+            "已完成",
+            "当前数据库与 Picture record 已复制到共享路径；布局与备份页背景仍在本机 exe 旁。\n请重启软件后生效。",
+        )
     
     def backup_data(self):
         """导出系统数据为 JSON 文件"""

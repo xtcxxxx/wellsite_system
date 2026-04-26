@@ -4,13 +4,28 @@ import threading
 from contextlib import contextmanager
 from typing import Any, List, Optional, Tuple, Union
 
+from runtime_flags import local_wellsite_path
+
 
 class Database:
-    def __init__(self, db_path=None):
-        if db_path is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            db_path = os.path.join(base_dir, "wellsite.db")
-        self.db_path = db_path
+    def __init__(self, db_path: str):
+        """
+        必须传入共享库（或其它非「本机默认」）的绝对/规范化路径。
+        禁止 db_path 为空，也禁止等于 exe/项目根旁的 wellsite.db，与纯客户端策略一致。
+        """
+        if db_path is None or not str(db_path).strip():
+            raise ValueError(
+                "未指定数据库路径：本程序仅允许连接共享 wellsite.db，"
+                "请通过环境变量、network_settings.json 或启动向导配置后再连接。"
+            )
+        resolved = os.path.normpath(os.path.expandvars(str(db_path).strip()))
+        forbidden = os.path.normpath(os.path.abspath(local_wellsite_path()))
+        if os.path.normcase(os.path.abspath(resolved)) == os.path.normcase(forbidden):
+            raise ValueError(
+                "禁止使用本机默认路径上的 wellsite.db（与可执行文件/项目根同目录）。\n"
+                "请仅使用主机共享路径上的数据库文件。"
+            )
+        self.db_path = resolved
         print("数据库路径：", os.path.abspath(self.db_path))
 
         self.local = threading.local()
